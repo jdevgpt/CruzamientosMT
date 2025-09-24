@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CruzamientosMT — Detector de defectos</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <h1>CruzamientosMT</h1>
+      <p class="tagline">Detecta defectos de cruzamientos en líneas MT — según Guía AED017</p>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="card">
+      <h2>Introduzca medidas del cruce</h2>
+      <form id="form">
+        <label>Tipo de cruce
+          <select id="tipo">
+            <option value="linea-linea">Línea ↔ Línea / Telecom</option>
+            <option value="linea-carretera">Línea ↔ Carretera</option>
+            <option value="linea-edificio">Línea ↔ Edificio</option>
+            <option value="linea-rio">Línea ↔ Río/Canal</option>
+            <option value="linea-ferrocarril">Línea ↔ Ferrocarril</option>
+          </select>
+        </label>
+
+        <fieldset>
+          <legend>Datos de la línea superior (si aplica)</legend>
+          <label>Tensión nominal U (kV)
+            <input type="number" id="U" step="0.1" min="0" value="15"/>
+          </label>
+          <label>Distancia al apoyo superior L1 (m)
+            <input type="number" id="L1" step="0.01" min="0" value="5"/>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Datos de la línea inferior / cruce</legend>
+          <label>Distancia al apoyo inferior L2 (m)
+            <input type="number" id="L2" step="0.01" min="0" value="5"/>
+          </label>
+          <label>Distancia medida entre conductores / rasante (m)
+            <input type="number" id="medida" step="0.01" min="0" value="2.5"/>
+          </label>
+        </fieldset>
+
+        <details>
+          <summary>Opciones avanzadas</summary>
+          <label>¿Instalación anterior a 2010?
+            <input type="checkbox" id="antes2010" checked />
+          </label>
+          <label>Tipo conductor:
+            <select id="tipoConductor">
+              <option value="desnudo">Desnudo</option>
+              <option value="recubierto">Recubierto</option>
+              <option value="unipolar">Unipolar aislado en haz</option>
+            </select>
+          </label>
+        </details>
+
+        <div class="actions">
+          <button type="button" id="analizar">Analizar cruce</button>
+          <button type="reset" class="muted">Limpiar</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card" id="resultadoCard" hidden>
+      <h2>Resultado</h2>
+      <div id="resumen"></div>
+      <hr/>
+      <div id="detalle"></div>
+    </section>
+
+    <section class="card info">
+      <h3>Notas</h3>
+      <ul>
+        <li>La app aplica las fórmulas y límites de la Guía AED017 (ver referencias en el README).</li>
+        <li>Siempre documenta con fotografías en campo si detectas un defecto (requisito de la guía).</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <small>Hecho para ti • CruzamientosMT • Colores: naranja / blanco / gris claro</small>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
