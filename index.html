@@ -22,8 +22,11 @@
         <label class="full">Instalación / línea
           <input type="text" id="g-inst" placeholder="Ej. LMT Almendralejo 2" autocomplete="off" />
         </label>
-        <label>Fecha puesta en servicio
-          <input type="date" id="g-fecha" />
+        <label>Año puesta en servicio (opcional)
+          <span class="inline">
+            <input type="text" id="g-anio" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="No se sabe" autocomplete="off" />
+            <button type="button" id="g-anio-x" class="muted" aria-label="Borrar año">×</button>
+          </span>
         </label>
         <label>Tensión nominal U (kV)
           <input type="number" id="g-U" inputmode="decimal" step="any" min="0" list="tensiones" value="15" />

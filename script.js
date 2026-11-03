@@ -18,22 +18,50 @@ function toast(msg){
 }
 
 /* ---------- estado global ---------- */
-const G = Object.assign({inst:'', fecha:'', U:15, cond:'desnudo'}, store.get('cmt_global', {}));
+const G = Object.assign({inst:'', anio:'', U:15, cond:'desnudo'}, store.get('cmt_global', {}));
+if (G.fecha && !G.anio) G.anio = String(G.fecha).slice(0, 4);   // versión anterior guardaba fecha completa
+delete G.fecha;
 const VALS = store.get('cmt_vals', {});
 let INF = store.get('cmt_informe', []);
 let TAB = store.get('cmt_tab', 'MT');
 
+/* Cortes de reglamento. Con solo el año, el año del corte queda indeterminado (null). */
+const CORTES = [
+  {k:'pre1982', y:1982, txt:'01/12/1982'},   // RD 3275/1982 (altura pantallas CD)
+  {k:'pre2001', y:2001, txt:'2001', exacto:true}, // L33B: "anteriores a 2001"
+  {k:'pre2010', y:2010, txt:'19/03/2010'},   // líneas: RD 223/2008
+  {k:'pre2016', y:2016, txt:'09/06/2016'}    // centros: RD 337/2014
+];
 function eras(){
-  const f = G.fecha;
-  return {
-    known: !!f,
-    pre2010: f ? f < '2010-03-19' : null,   // líneas: RD 223/2008
-    pre2016: f ? f < '2016-06-09' : null,   // centros: RD 337/2014
-    pre2001: f ? f < '2001-01-01' : null,   // L33B
-    pre1982: f ? f < '1982-12-01' : null,   // RD 3275/1982 (altura pantallas)
-    U: num(G.U),
-    cond: G.cond
-  };
+  const y = parseInt(G.anio, 10);
+  const has = !isNaN(y) && y > 1900;
+  const e = {anio: has ? y : null, U: num(G.U), cond: G.cond};
+  CORTES.forEach(c => {
+    if (!has) e[c.k] = null;
+    else if (c.exacto) e[c.k] = y < c.y;
+    else e[c.k] = y < c.y ? true : y > c.y ? false : null;
+  });
+  e.known = CORTES.every(c => e[c.k] !== null);
+  return e;
+}
+/* Tramos de fecha entre cortes; cada uno es un escenario completo */
+const TRAMOS = [0,1,2,3,4].map(i => {
+  const e = {};
+  CORTES.forEach((c, j) => e[c.k] = j >= i);
+  return e;
+});
+function tramosPosibles(e){
+  const idx = [];
+  TRAMOS.forEach((t, i) => { if (CORTES.every(c => e[c.k] === null || e[c.k] === t[c.k])) idx.push(i); });
+  return idx;
+}
+function etiquetaTramo(i, j, first, last){
+  const lo = i > first ? CORTES[i - 1] : null, hi = j < last ? CORTES[j] : null;
+  const t = c => c.exacto ? c.txt : 'el ' + c.txt;
+  if (lo && hi) return `entre ${t(lo)} y ${t(hi)}`;
+  if (hi) return `antes de${hi.exacto ? '' : 'l'} ${hi.txt}`;
+  if (lo) return `a partir de${lo.exacto ? '' : 'l'} ${lo.txt}`;
+  return 'cualquier fecha';
 }
 const condTxt = c => ({desnudo:'desnudo', recubierto:'recubierto', haz:'aislado en haz'}[c] || c);
 
@@ -529,6 +557,45 @@ function buildCards(){
   });
 }
 
+/* Normaliza un resultado de calc */
+function finalSt(r){
+  const extra = r.extraDef || [];
+  let st = r.st;
+  if (extra.length && !r.plain && st !== 'na') st = 'def';
+  return st;
+}
+const dec = u => u === 'cm' ? 0 : 2;
+const mTxt = r => r.min != null ? `${fmt(r.min, dec(r.unit))} ${r.unit}` : null;
+const verdict = st => st === 'def' ? '❗ Defecto' : st === 'ok' ? '✔ No es defecto' : st === 'info' ? 'Comprobación visual' : 'Introduce la medida';
+const strip = x => String(x).replace(/<[^>]+>/g, '');
+
+/* Ejecuta la comprobación en todos los tramos de fecha posibles y agrupa los que dan lo mismo */
+function evaluar(c, v, e){
+  const idx = tramosPosibles(e);
+  const runs = idx.map(i => {
+    const ee = Object.assign({}, e, TRAMOS[i], {known:true});
+    const r = c.calc(v, ee) || {st:'pend', lines:[]};
+    r.final = finalSt(r);
+    return {i, r, key: JSON.stringify([r.final, r.min, (r.extraDef || []).join('|')])};
+  });
+  const groups = [];
+  runs.forEach(x => {
+    const g = groups[groups.length - 1];
+    if (g && g.key === x.key) { g.j = x.i; } else groups.push({key: x.key, i: x.i, j: x.i, r: x.r});
+  });
+  if (groups.length === 1) return groups[0].r;
+  const first = idx[0], last = idx[idx.length - 1];
+  groups.forEach(g => g.label = etiquetaTramo(g.i, g.j, first, last));
+  const sts = groups.map(g => g.r.final);
+  const r0 = groups[0].r;
+  let st;
+  if (sts.every(s => s === 'def')) st = 'def';
+  else if (sts.every(s => s === 'ok')) st = 'ok';
+  else if (sts.some(s => s === 'pend')) st = 'pend';
+  else st = 'dep';
+  return {st, final: st, dep: groups, med: r0.med, unit: r0.unit};
+}
+
 function update(c){
   const el = cardEls[c.id], v = vals(c), e = eras();
   c.fields.forEach(f => {
@@ -537,37 +604,46 @@ function update(c){
   });
   const code = codeOf(c, v);
   el.querySelector('.code').textContent = code;
-  const r = c.calc(v, e) || {st:'pend', lines:[]};
+  const r = evaluar(c, v, e);
   c._last = r;
-  const extra = r.extraDef || [];
-  let st = r.st;
-  if (extra.length && st !== 'na' && st !== 'pend' && !r.plain) st = 'def';
-  if (extra.length && (st === 'pend' || st === 'info') && !r.plain) st = 'def';
-  r.final = st;
+  const st = r.final;
 
-  el.classList.remove('st-def', 'st-ok');
-  if (st === 'def') el.classList.add('st-def');
-  if (st === 'ok') el.classList.add('st-ok');
+  el.classList.remove('st-def', 'st-ok', 'st-dep');
+  if (st === 'def' || st === 'ok' || st === 'dep') el.classList.add('st-' + st);
   const pill = el.querySelector('.pill');
   pill.className = 'pill ' + st;
-  pill.textContent = st === 'def' ? 'Defecto' : st === 'ok' ? 'Correcto' : '';
+  pill.textContent = st === 'def' ? 'Defecto' : st === 'ok' ? 'Correcto' : st === 'dep' ? 'Según fecha' : '';
 
   let h = '';
-  const minTxt = r.min != null ? `${fmt(r.min, r.unit === 'cm' ? 0 : 2)} ${r.unit}` : null;
-  if (st === 'def') h += `<div class="big">❗ Defecto ${code}</div>`;
-  else if (st === 'ok') h += `<div class="big">✔ No es defecto</div>`;
-  else if (st === 'na') h += `<div class="big">Falta un dato</div>`;
-  else if (st === 'info') h += `<div class="big">Comprobación visual</div>`;
-  else if (minTxt) h += `<div class="big">Mínimo reglamentario: ${minTxt}</div>`;
-  if (minTxt && !isNaN(r.med) && r.med != null) {
-    h += `<div class="cmp">Medido <b>${fmt(r.med, r.unit === 'cm' ? 0 : 2)} ${r.unit}</b> ${r.st === 'def' ? '<' : '≥'} mínimo <b>${minTxt}</b></div>`;
+  const hasMed = r.med != null && !isNaN(r.med);
+  if (r.dep) {
+    h += `<div class="big">${st === 'dep' ? '⚠ Depende de la puesta en servicio' : st === 'pend' ? 'El mínimo depende de la puesta en servicio' : verdict(st) + ' (en cualquier fecha)'}</div>`;
+    if (hasMed) h += `<div class="cmp">Medido <b>${fmt(r.med, dec(r.unit))} ${r.unit}</b></div>`;
+    h += '<div class="casos">' + r.dep.map(g => {
+      const gr = g.r, m = mTxt(gr);
+      const det = [...(gr.extraDef || []).map(x => `<b>${x}</b>`), ...(gr.lines || [])];
+      return `<div class="caso ${gr.final}">
+        <div class="caso-h"><span>Si se puso en servicio <b>${g.label}</b></span><span class="caso-v">${gr.final === 'pend' ? (m ? 'mín. ' + m : '') : verdict(gr.final)}</span></div>
+        ${m && gr.final !== 'pend' ? `<div class="caso-m">Mínimo ${m}</div>` : ''}
+        ${det.length ? `<ul>${det.map(x => `<li>${x}</li>`).join('')}</ul>` : ''}
+      </div>`;
+    }).join('') + '</div>';
+    if (st === 'dep') h += '<p class="nota">No se sabe la fecha exacta: decide tú qué caso aplica.</p>';
+  } else {
+    const extra = r.extraDef || [];
+    const m = mTxt(r);
+    if (st === 'def') h += `<div class="big">❗ Defecto ${code}</div>`;
+    else if (st === 'ok') h += `<div class="big">✔ No es defecto</div>`;
+    else if (st === 'info') h += `<div class="big">Comprobación visual</div>`;
+    else if (m) h += `<div class="big">Mínimo reglamentario: ${m}</div>`;
+    if (m && hasMed) h += `<div class="cmp">Medido <b>${fmt(r.med, dec(r.unit))} ${r.unit}</b> ${r.st === 'def' ? '<' : '≥'} mínimo <b>${m}</b></div>`;
+    const items = [...extra.map(x => `<b>${x}</b>`), ...(r.lines || [])];
+    if (items.length) h += `<ul>${items.map(x => `<li>${x}</li>`).join('')}</ul>`;
   }
-  const items = [...extra.map(x => `<b>${x}</b>`), ...(r.lines || [])];
-  if (items.length) h += `<ul>${items.map(x => `<li>${x}</li>`).join('')}</ul>`;
   const res = el.querySelector('.res');
   res.className = 'res ' + st;
   res.innerHTML = h;
-  el.querySelector('.add').disabled = !(st === 'def' || st === 'ok');
+  el.querySelector('.add').disabled = !(st === 'def' || st === 'ok' || st === 'dep');
 }
 
 function updateAll(){
@@ -578,7 +654,7 @@ function updateAll(){
 
 function counts(){
   const n = {MT:0, PT:0, CD:0};
-  CHECKS.forEach(c => { if (c._last && c._last.final === 'def') n[c.g]++; });
+  CHECKS.forEach(c => { if (c._last && (c._last.final === 'def' || c._last.final === 'dep')) n[c.g]++; });
   document.querySelectorAll('#tabs button').forEach(b => {
     const t = b.dataset.tab, cnt = b.querySelector('.cnt');
     cnt.textContent = t === 'INF' ? (INF.length || '') : (n[t] || '');
@@ -588,8 +664,12 @@ function counts(){
 function renderEras(){
   const e = eras();
   const el = $('#eras');
-  if (!e.known) { el.innerHTML = '<span class="warn">Sin fecha de puesta en servicio:</span> las distancias que dependen de la fecha no se calcularán.'; return; }
-  el.innerHTML = `Líneas: <b>${e.pre2010 ? 'antes' : 'después'} de 19/03/2010</b> · Centros PT/CD: <b>${e.pre2016 ? 'antes' : 'después'} de 09/06/2016</b> · L33B: <b>${e.pre2001 ? 'antes' : 'después'} de 2001</b>`;
+  if (e.anio == null) { el.innerHTML = '<span class="warn">Sin año de puesta en servicio.</span> Puedes seguir: si un defecto depende de la fecha verás los dos casos.'; return; }
+  const parts = [];
+  const desc = (k, nom, c) => e[k] === null ? `${nom}: <span class="warn">${e.anio} — no se sabe si antes o después del ${c}</span>` : `${nom}: <b>${e[k] ? 'antes' : 'después'} del ${c}</b>`;
+  parts.push(desc('pre2010', 'Líneas', '19/03/2010'));
+  parts.push(desc('pre2016', 'Centros PT/CD', '09/06/2016'));
+  el.innerHTML = parts.join(' · ');
 }
 
 /* ---------- pestañas y búsqueda ---------- */
@@ -608,24 +688,37 @@ function filter(){
 }
 
 /* ---------- informe ---------- */
+function obsDe(r){
+  const d = dec(r.unit);
+  if (r.dep) {
+    const med = r.med != null && !isNaN(r.med) ? `Medido ${fmt(r.med, d)} ${r.unit}. ` : '';
+    return med + r.dep.map(g => {
+      const gr = g.r, m = mTxt(gr);
+      const extra = (gr.extraDef || []).length ? ' (' + gr.extraDef.map(strip).join(' ') + ')' : '';
+      return `P.e.s. ${g.label}: ${m ? 'mín. ' + m + ' → ' : ''}${gr.final === 'def' ? 'DEFECTO' : gr.final === 'ok' ? 'correcto' : 'revisar'}${extra}`;
+    }).join('; ');
+  }
+  let obs;
+  if (r.min != null && r.med != null && !isNaN(r.med)) {
+    obs = r.final === 'def'
+      ? `Distancia mínima medida ${fmt(r.med, d)} ${r.unit} < ${fmt(r.min, d)} ${r.unit} reglamentaria`
+      : `Distancia medida ${fmt(r.med, d)} ${r.unit} ≥ ${fmt(r.min, d)} ${r.unit}`;
+    if (r.extraDef && r.extraDef.length) obs += '. ' + r.extraDef.map(strip).join(' ');
+  } else {
+    obs = (r.extraDef && r.extraDef.length ? r.extraDef : (r.lines || []).slice(0, 2)).map(strip).join(' ');
+  }
+  return obs;
+}
+const stTxt = s => s === 'def' ? 'DEFECTO' : s === 'dep' ? 'Según fecha' : 'Correcto';
+
 function addToReport(c, el){
   const v = vals(c), r = c._last;
-  if (!r || !(r.final === 'def' || r.final === 'ok')) return;
+  if (!r || !(r.final === 'def' || r.final === 'ok' || r.final === 'dep')) return;
   const code = codeOf(c, v);
   const refInp = el.querySelector('.ref');
-  const dec = r.unit === 'cm' ? 0 : 2;
-  let obs;
-  if (r.min != null && !isNaN(r.med)) {
-    obs = r.final === 'def'
-      ? `Distancia mínima medida ${fmt(r.med, dec)} ${r.unit} < ${fmt(r.min, dec)} ${r.unit} reglamentaria`
-      : `Distancia medida ${fmt(r.med, dec)} ${r.unit} ≥ ${fmt(r.min, dec)} ${r.unit}`;
-  } else {
-    obs = (r.extraDef && r.extraDef.length ? r.extraDef : r.lines.slice(0, 2)).map(x => x.replace(/<[^>]+>/g, '')).join(' ');
-  }
-  if (r.extraDef && r.extraDef.length && r.min != null) obs += '. ' + r.extraDef.join(' ');
   INF.push({
-    t: Date.now(), inst: G.inst, ref: refInp.value.trim(), code, title: c.title, guia: c.g,
-    st: r.final, med: isNaN(r.med) ? null : r.med, min: r.min ?? null, unit: r.unit || '', obs
+    t: Date.now(), inst: G.inst, anio: G.anio || '', ref: refInp.value.trim(), code, title: c.title, guia: c.g,
+    st: r.final, med: (r.med == null || isNaN(r.med)) ? null : r.med, min: r.dep ? null : (r.min ?? null), unit: r.unit || '', obs: obsDe(r)
   });
   store.set('cmt_informe', INF);
   refInp.value = '';
@@ -635,15 +728,15 @@ function addToReport(c, el){
 
 function renderReport(){
   const ul = $('#inf-lista');
-  const nd = INF.filter(x => x.st === 'def').length;
+  const nd = INF.filter(x => x.st === 'def').length, np = INF.filter(x => x.st === 'dep').length;
   $('#inf-vacio').hidden = INF.length > 0;
   $('#inf-acciones').hidden = INF.length === 0;
-  $('#inf-resumen').innerHTML = INF.length ? `<div><b>${INF.length}</b>comprobaciones</div><div class="d"><b>${nd}</b>defectos</div><div class="o"><b>${INF.length - nd}</b>correctas</div>` : '';
+  $('#inf-resumen').innerHTML = INF.length ? `<div class="d"><b>${nd}</b>defectos</div><div class="p"><b>${np}</b>según fecha</div><div class="o"><b>${INF.length - nd - np}</b>correctas</div>` : '';
   ul.innerHTML = INF.map((x, i) => `
     <li class="${x.st}">
-      <b>${esc(x.code)}</b> · ${x.st === 'def' ? 'DEFECTO' : 'Correcto'}${x.ref ? ` <span class="ref">· ${esc(x.ref)}</span>` : ''}<br/>
+      <b>${esc(x.code)}</b> · ${stTxt(x.st)}${x.ref ? ` <span class="ref">· ${esc(x.ref)}</span>` : ''}<br/>
       ${esc(x.obs)}
-      <div class="ref">${esc(x.title)}${x.inst ? ' · ' + esc(x.inst) : ''} · ${new Date(x.t).toLocaleString('es-ES', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})}</div>
+      <div class="ref">${esc(x.title)}${x.inst ? ' · ' + esc(x.inst) : ''}${x.anio ? ' · p.e.s. ' + esc(x.anio) : ''} · ${new Date(x.t).toLocaleString('es-ES', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})}</div>
       <button type="button" class="del" data-i="${i}" aria-label="Quitar">×</button>
     </li>`).join('');
   ul.querySelectorAll('.del').forEach(b => b.addEventListener('click', () => {
@@ -656,9 +749,11 @@ function reportText(){
   const insts = [...new Set(INF.map(x => x.inst).filter(Boolean))];
   const nd = INF.filter(x => x.st === 'def').length;
   let t = `*Revisión de distancias${insts.length ? ' – ' + insts.join(', ') : ''}*\n${hoy} · ${nd} defecto(s) de ${INF.length} comprobaciones\n`;
-  const defs = INF.filter(x => x.st === 'def'), oks = INF.filter(x => x.st !== 'def');
-  if (defs.length) t += '\n❗ *Defectos*\n' + defs.map(x => `• ${x.code}${x.ref ? ' (' + x.ref + ')' : ''}: ${x.obs}`).join('\n') + '\n';
-  if (oks.length) t += '\n✔ *Correctos*\n' + oks.map(x => `• ${x.code}${x.ref ? ' (' + x.ref + ')' : ''}: ${x.obs}`).join('\n') + '\n';
+  const linea = x => `• ${x.code}${x.ref ? ' (' + x.ref + ')' : ''}: ${x.obs}`;
+  const bloque = (tit, arr) => arr.length ? `\n${tit}\n` + arr.map(linea).join('\n') + '\n' : '';
+  t += bloque('❗ *Defectos*', INF.filter(x => x.st === 'def'));
+  t += bloque('⚠ *Según fecha de puesta en servicio*', INF.filter(x => x.st === 'dep'));
+  t += bloque('✔ *Correctos*', INF.filter(x => x.st === 'ok'));
   return t;
 }
 
@@ -678,10 +773,10 @@ $('#inf-copiar').addEventListener('click', () => {
 $('#inf-csv').addEventListener('click', () => {
   const q = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
   const n = x => x == null ? '' : String(x).replace('.', ',');
-  const head = ['Fecha', 'Hora', 'Instalación', 'Apoyo/ubicación', 'Guía', 'Código', 'Descripción', 'Resultado', 'Medido', 'Mínimo', 'Unidad', 'Observaciones'];
+  const head = ['Fecha', 'Hora', 'Instalación', 'Año p.e.s.', 'Apoyo/ubicación', 'Guía', 'Código', 'Descripción', 'Resultado', 'Medido', 'Mínimo', 'Unidad', 'Observaciones'];
   const rows = INF.map(x => {
     const d = new Date(x.t);
-    return [d.toLocaleDateString('es-ES'), d.toLocaleTimeString('es-ES', {hour:'2-digit', minute:'2-digit'}), x.inst, x.ref, x.guia, x.code, x.title, x.st === 'def' ? 'DEFECTO' : 'Correcto', n(x.med), n(x.min), x.unit, x.obs].map(q).join(';');
+    return [d.toLocaleDateString('es-ES'), d.toLocaleTimeString('es-ES', {hour:'2-digit', minute:'2-digit'}), x.inst, x.anio || 'Desconocido', x.ref, x.guia, x.code, x.title, stTxt(x.st), n(x.med), n(x.min), x.unit, x.obs].map(q).join(';');
   });
   const csv = '﻿' + head.map(q).join(';') + '\r\n' + rows.join('\r\n');
   const a = document.createElement('a');
@@ -690,18 +785,25 @@ $('#inf-csv').addEventListener('click', () => {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 });
-$('#inf-borrar').addEventListener('click', () => {
-  if (!confirm('¿Vaciar todo el informe?')) return;
+$('#inf-borrar').addEventListener('click', e => {
+  const b = e.currentTarget;
+  if (!b.dataset.armado) {
+    b.dataset.armado = '1'; b.textContent = 'Pulsa otra vez para vaciar';
+    setTimeout(() => { delete b.dataset.armado; b.textContent = 'Vaciar informe'; }, 3000);
+    return;
+  }
+  delete b.dataset.armado; b.textContent = 'Vaciar informe';
   INF = []; store.set('cmt_informe', INF); renderReport(); counts();
 });
 
 /* ---------- datos globales ---------- */
 function bindGlobal(){
-  const inst = $('#g-inst'), fecha = $('#g-fecha'), U = $('#g-U');
-  inst.value = G.inst; fecha.value = G.fecha; U.value = G.U;
+  const inst = $('#g-inst'), anio = $('#g-anio'), U = $('#g-U');
+  inst.value = G.inst; anio.value = G.anio; U.value = G.U;
   const save = () => store.set('cmt_global', G);
   inst.addEventListener('input', () => { G.inst = inst.value; save(); });
-  fecha.addEventListener('change', () => { G.fecha = fecha.value; save(); updateAll(); });
+  anio.addEventListener('input', () => { G.anio = anio.value.replace(/\D/g, '').slice(0, 4); save(); updateAll(); });
+  $('#g-anio-x').addEventListener('click', () => { anio.value = ''; G.anio = ''; save(); updateAll(); });
   U.addEventListener('input', () => { G.U = U.value; save(); updateAll(); });
   const seg = $('#g-cond');
   const paint = () => seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === G.cond));

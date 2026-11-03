@@ -97,6 +97,28 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--orange);outline-
 .res li{margin:2px 0}
 .res .formula{font-family:ui-monospace,Consolas,monospace;font-size:13px}
 
+.inline{display:flex;gap:6px;align-items:stretch;margin-top:4px}
+.inline input{margin-top:0;flex:1;min-width:0}
+.inline button{flex:none;width:46px;padding:0;font-size:20px}
+
+.chkcard.st-dep{border-color:#f3c79f}
+.pill.dep{background:var(--orange-soft);color:var(--orange-dark)}
+.res.dep{background:var(--orange-soft)}
+.res.dep .big{color:var(--orange-dark)}
+.casos{display:grid;gap:8px;margin-top:8px}
+.caso{background:#fff;border-radius:9px;padding:10px;border-left:4px solid var(--muted)}
+.caso.def{border-left-color:var(--bad)}
+.caso.ok{border-left-color:var(--good)}
+.caso-h{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.caso-v{font-weight:700;white-space:nowrap}
+.caso.def .caso-v{color:var(--bad)}
+.caso.ok .caso-v{color:var(--good)}
+.caso-m{font-size:14px;margin-top:2px}
+.caso ul{font-size:13px;color:var(--muted)}
+.nota{margin:8px 0 0;font-size:13px;color:var(--orange-dark);font-weight:600}
+.inf-lista li.dep{border-left-color:var(--orange)}
+.inf-resumen .p b{color:var(--orange-dark)}
+
 .addbox{margin-top:10px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}
 .addbox label{margin:0}
 
