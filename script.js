@@ -1,77 +1,722 @@
-document.getElementById('analizar').addEventListener('click', function(){
-  const tipo = document.getElementById('tipo').value;
-  const U = parseFloat(document.getElementById('U').value) || 0;
-  const L1 = parseFloat(document.getElementById('L1').value) || 0;
-  const L2 = parseFloat(document.getElementById('L2').value) || 0;
-  const medida = parseFloat(document.getElementById('medida').value);
-  const antes2010 = document.getElementById('antes2010').checked;
-  const tipoConductor = document.getElementById('tipoConductor').value;
+/* CruzamientosMT — comprobación de distancias reglamentarias
+   Fuentes: AED017 V6 (líneas aéreas MT), FED030 V6 (PT), FED029 V7 (CD), ene-2026 */
+(function(){
+'use strict';
 
-  const resumenEl = document.getElementById('resumen');
-  const detalleEl = document.getElementById('detalle');
-  const card = document.getElementById('resultadoCard');
+/* ---------- utilidades ---------- */
+const $ = s => document.querySelector(s);
+const num = x => { if (x === '' || x == null) return NaN; return parseFloat(String(x).replace(',', '.')); };
+const fmt = (x, d) => (x == null || isNaN(x)) ? '—' : Number(x).toLocaleString('es-ES', {minimumFractionDigits: d == null ? 2 : d, maximumFractionDigits: d == null ? 2 : d});
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const store = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch(e){ return d; } },
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
+};
+function toast(msg){
+  const t = $('#toast'); t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, 2200);
+}
 
-  if (isNaN(medida)){
-    alert('Introduce una distancia medida válida.');
-    return;
-  }
+/* ---------- estado global ---------- */
+const G = Object.assign({inst:'', fecha:'', U:15, cond:'desnudo'}, store.get('cmt_global', {}));
+const VALS = store.get('cmt_vals', {});
+let INF = store.get('cmt_informe', []);
+let TAB = store.get('cmt_tab', 'MT');
 
-  let hallazgos = [];
-  let explicaciones = [];
+function eras(){
+  const f = G.fecha;
+  return {
+    known: !!f,
+    pre2010: f ? f < '2010-03-19' : null,   // líneas: RD 223/2008
+    pre2016: f ? f < '2016-06-09' : null,   // centros: RD 337/2014
+    pre2001: f ? f < '2001-01-01' : null,   // L33B
+    pre1982: f ? f < '1982-12-01' : null,   // RD 3275/1982 (altura pantallas)
+    U: num(G.U),
+    cond: G.cond
+  };
+}
+const condTxt = c => ({desnudo:'desnudo', recubierto:'recubierto', haz:'aislado en haz'}[c] || c);
 
-  // Ejemplo: Cruce línea ↔ línea (vertical) con G23B
-  if (tipo === 'linea-linea'){
-    if (antes2010){
-      const D2 = 1.5 + (U + L1 + L2) / 100;
-      explicaciones.push(`G23B (antes 2010): D2 = 1.5 + (U+L1+L2)/100 = ${D2.toFixed(3)} m`);
-      if (medida < D2) hallazgos.push({codigo:'G23B', texto:`${medida} m < ${D2.toFixed(3)} m`});
-    } else {
-      let min = (tipoConductor === 'unipolar') ? 0.5 : 1.0;
-      explicaciones.push(`G23B (post 2010): mínimo ${min} m`);
-      if (medida < min) hallazgos.push({codigo:'G23B', texto:`${medida} m < ${min} m`});
+/* ---------- resultado estándar ---------- */
+// med < min => defecto
+function resMin(med, min, unit, base, extra){
+  extra = extra || {};
+  const r = Object.assign({unit, min, med, lines: base || []}, extra);
+  if (min == null) { r.st = 'info'; return r; }
+  if (isNaN(med)) { r.st = 'pend'; return r; }
+  r.st = med < min ? 'def' : 'ok';
+  return r;
+}
+// med > max => defecto
+function resMax(med, max, unit, base){
+  const r = {unit, min: max, med, lines: base || [], isMax: true};
+  if (isNaN(med)) { r.st = 'pend'; return r; }
+  r.st = med > max ? 'def' : 'ok';
+  return r;
+}
+const needDate = () => ({st:'na', lines:['Indica la <b>fecha de puesta en servicio</b> arriba: la distancia depende de ella.']});
+const p10 = e => e.pre2010 ? 'anterior al 19/03/2010' : 'posterior al 19/03/2010';
+const p16 = e => e.pre2016 ? 'anterior al 09/06/2016' : 'posterior al 09/06/2016';
+
+/* G23B tabla post-2010 (U de la línea superior, distancia apoyo superior al cruce) */
+const T23 = [[10,1.95,2.65],[15,2.00,2.70],[20,2.05,2.75],[25,2.13,2.83],[30,2.20,2.90]];
+function tablaG23(U, L1){
+  const row = T23.find(r => U <= r[0] + 1e-9);
+  if (!row) return null;
+  return {min: L1 > 25 ? row[2] : row[1], row};
+}
+/* CD: d según tensión y reglamento */
+const dCD = (U, pre) => U <= 20 ? (pre ? 20 : 22) : (pre ? 27 : 32);
+
+/* ---------- comprobaciones ---------- */
+const F = {
+  med: (label, unit) => ({k:'med', t:'num', label: label || 'Distancia medida', unit: unit || 'm'}),
+};
+
+const CHECKS = [
+/* ===================== LÍNEAS MT (AED017) ===================== */
+{ id:'G23B', g:'MT', title:'Cruce con líneas eléctricas o telecom. Distancia vertical',
+  desc:'Distancia vertical entre conductores de ambas líneas en el punto de cruce.',
+  fields:[
+    {k:'cruce', t:'sel', label:'Cruce con', def:'elec', opts:[['elec','Línea eléctrica'],['tel','Línea de telecomunicaciones']]},
+    {k:'pos', t:'sel', label:'Nuestra línea pasa', def:'encima', opts:[['encima','Por encima'],['debajo','Por debajo']], show:v=>v.cruce==='elec'},
+    {k:'Uo', t:'num', label:'Tensión de la otra línea', unit:'kV', show:v=>v.cruce==='elec'},
+    {k:'condO', t:'sel', label:'Conductor de la otra línea', def:'desnudo', opts:[['desnudo','Desnudo'],['recubierto','Recubierto'],['haz','Aislado en haz']], show:v=>v.cruce==='elec'},
+    {k:'L1', t:'num', label:'L1: cruce → apoyo más próximo línea superior', unit:'m'},
+    {k:'L2', t:'num', label:'L2: cruce → apoyo más próximo línea inferior', unit:'m', show:(v,e)=>e.pre2010!==false},
+    {k:'auto', t:'chk', label:'Existe autorización expresa para cruzar por encima', show:v=>v.cruce==='elec'},
+    F.med('Distancia vertical medida entre conductores')
+  ],
+  calc(v, e){
+    const med = num(v.med), L1 = num(v.L1) || 0, L2 = num(v.L2) || 0;
+    const elec = v.cruce !== 'tel';
+    const Uo = num(v.Uo);
+    const ourTop = !elec || v.pos !== 'debajo';
+    const Usup = ourTop ? e.U : Uo;
+    const lines = [], extraDef = [];
+    if (elec && !isNaN(Uo) && !v.auto) {
+      const Uarriba = ourTop ? e.U : Uo, Uabajo = ourTop ? Uo : e.U;
+      if (Uarriba < Uabajo) extraDef.push(`La línea de menor tensión (${fmt(Uarriba,0)} kV) cruza por encima de la de mayor tensión (${fmt(Uabajo,0)} kV).`);
     }
-  }
-
-  // Cruce horizontal GA2B
-  if (tipo === 'linea-linea' || tipo === 'linea-carretera' || tipo === 'linea-ferrocarril'){
-    if (antes2010){
-      const D2ga = 1.5 + U/150;
-      explicaciones.push(`GA2B (antes 2010): D2 = 1.5 + U/150 = ${D2ga.toFixed(3)} m`);
-      if (medida < D2ga) hallazgos.push({codigo:'GA2B', texto:`${medida} m < ${D2ga.toFixed(3)} m`});
+    if (!e.known) return needDate();
+    if (isNaN(Usup)) return {st:'pend', lines:['Indica la tensión de la otra línea.']};
+    let min;
+    if (e.pre2010) {
+      min = 1.5 + (Usup + L1 + L2) / 100;
+      lines.push(`Instalación ${p10(e)}: <span class="formula">D2 = 1,5 + (U + L1 + L2)/100 = 1,5 + (${fmt(Usup,1)} + ${fmt(L1,1)} + ${fmt(L2,1)})/100 = ${fmt(min,3)} m</span>`);
+      lines.push('U = tensión de la línea superior. Antes de 2010 los cables en haz se tratan como desnudos.');
     } else {
-      if (medida < 2.0) hallazgos.push({codigo:'GA2B', texto:`${medida} m < 2.0 m`});
-      else explicaciones.push('GA2B: cumple con ≥ 2.0 m');
+      const ours = e.cond, oth = elec ? v.condO : 'tel';
+      const tab = () => {
+        const t = tablaG23(Usup, L1);
+        if (!t) { lines.push(`U = ${fmt(Usup,0)} kV fuera de la tabla (10–30 kV): consultar.`); return null; }
+        lines.push(`Instalación ${p10(e)}: tabla de la guía para U ≤ ${t.row[0]} kV y apoyo superior a ${L1 > 25 ? 'más de' : '25 m o menos de'} 25 m del cruce → <b>${fmt(t.min)} m</b>.`);
+        return t.min;
+      };
+      if (!elec) {
+        if (ours === 'haz') { min = 1.0; lines.push('Cable en haz con línea de telecomunicaciones: mínimo 1 m en el caso más desfavorable.'); }
+        else if (ours === 'recubierto') { min = 1.5; lines.push('Cable recubierto con línea de telecomunicaciones: mínimo 1,5 m.'); }
+        else min = tab();
+      } else if (ours === 'haz' && oth === 'haz') {
+        lines.push('Cruce entre dos líneas en haz: no hay distancia fija; basta con que no haya rozamientos ni deterioros entre ellas.');
+        return {st:'info', lines, extraDef};
+      } else if ((ours === 'haz' && oth === 'desnudo') || (ours === 'desnudo' && oth === 'haz')) {
+        const Udes = ours === 'desnudo' ? e.U : Uo;
+        const hazArriba = (ours === 'haz') === ourTop;
+        if (Udes <= 30) {
+          min = 0.5;
+          lines.push('Cable en haz con línea desnuda ≤ 30 kV: mínimo 0,5 m en el caso más desfavorable.');
+          if (hazArriba) extraDef.push('El cable en haz debe ir siempre por debajo de la línea desnuda.');
+        } else { lines.push('Línea desnuda > 30 kV: se aplican las distancias de dos líneas desnudas.'); min = tab(); }
+      } else {
+        if (ours === 'recubierto' || oth === 'recubierto') lines.push('Con conductor recubierto se aplican las mismas distancias que entre líneas desnudas.');
+        min = tab();
+      }
     }
+    if (min == null) return {st:'info', lines, extraDef};
+    return resMin(med, min, 'm', lines, {extraDef});
   }
-
-  // Carreteras G53B
-  if (tipo === 'linea-carretera'){
-    if (medida < 7.0) hallazgos.push({codigo:'G53B', texto:`${medida} m < 7.0 m`});
-    else explicaciones.push('G53B: cumple con ≥ 7.0 m');
+},
+{ id:'GA2B', g:'MT', title:'Cruce con líneas. Distancia horizontal a apoyos',
+  desc:'Distancia del conductor a los apoyos de otras líneas eléctricas o de telecomunicaciones.',
+  fields:[
+    {k:'Usup', t:'num', label:'Tensión de la línea superior (si no es la nuestra)', unit:'kV', show:(v,e)=>e.pre2010!==false},
+    F.med('Distancia horizontal conductor → apoyo')
+  ],
+  calc(v, e){
+    if (!e.known) return needDate();
+    const med = num(v.med);
+    if (e.pre2010) {
+      const U = isNaN(num(v.Usup)) ? e.U : num(v.Usup);
+      const min = 1.5 + U / 150;
+      return resMin(med, min, 'm', [`Instalación ${p10(e)}: <span class="formula">D2 = 1,5 + U/150 = 1,5 + ${fmt(U,1)}/150 = ${fmt(min,3)} m</span>`, 'Indicar en observaciones si el cruce es con línea AT, MT, BT o telecomunicaciones.']);
+    }
+    return resMin(med, 2, 'm', [`Instalación ${p10(e)}: D2 = 2 m (igual para haz y recubierto).`, 'Indicar en observaciones si el cruce es con línea AT, MT, BT o telecomunicaciones.']);
   }
-
-  // Edificios L31B / L32B
-  if (tipo === 'linea-edificio'){
-    const lim = antes2010 ? 5.0 : 6.0;
-    if (medida < lim) hallazgos.push({codigo:'L31B', texto:`${medida} m < ${lim} m`});
-    const lim32 = (tipoConductor === 'unipolar') ? 2.0 : 4.0;
-    if (medida < lim32) hallazgos.push({codigo:'L32B', texto:`${medida} m < ${lim32} m`});
+},
+{ id:'G53B', g:'MT', title:'Cruce con carreteras. Distancia a la rasante',
+  desc:'Distancia vertical de los conductores a la rasante de la calzada (vías del nomenclátor oficial).',
+  fields:[
+    {k:'estado', t:'chk', label:'Carretera del Estado en obra al amparo del RD 899/2025'},
+    F.med('Distancia vertical a la rasante')
+  ],
+  calc(v){
+    const min = v.estado ? 8 : 7;
+    return resMin(num(v.med), min, 'm', [v.estado ? 'Carretera del Estado, obra según RD 899/2025: mínimo 8 m.' : 'Mínimo 7 m (también en haz y recubierto).', 'Anotar siempre el código de la vía de comunicación.']);
   }
-
-  // Río / Canal G61B (ejemplo)
-  if (tipo === 'linea-rio'){
-    const G = 4.7, Del = 0.27;
-    const D = G + 2.3 + Del;
-    if (medida < D) hallazgos.push({codigo:'G61B', texto:`${medida} m < ${D.toFixed(2)} m`});
+},
+{ id:'G58B', g:'MT', title:'Cruce con ferrocarril sin electrificar',
+  desc:'Distancia vertical entre conductores y las cabezas de raíles.',
+  fields:[F.med('Distancia vertical a cabeza de raíl')],
+  calc(v){ return resMin(num(v.med), 7, 'm', ['Mínimo 7 m (también en haz y recubierto).']); }
+},
+{ id:'G81B', g:'MT', title:'Cruce con ferrocarril electrificado',
+  desc:'Distancia entre los conductores y la catenaria.',
+  fields:[F.med('Distancia conductor → catenaria')],
+  calc(v, e){
+    if (!e.known) return needDate();
+    const min = e.pre2010 ? 3 : 4;
+    return resMin(num(v.med), min, 'm', [`Instalación ${p10(e)}: D = ${min} m.`]);
   }
+},
+{ id:'G61B', g:'MT', title:'Cruce con ríos y canales navegables',
+  desc:'Distancia vertical en el punto más bajo de la catenaria sobre el cauce.',
+  fields:[
+    {k:'G', t:'num', label:'Gálibo G (si no se conoce: 4,7)', unit:'m', def:'4.7'},
+    {k:'Del', t:'num', label:'Distancia de aislamiento Del (30 kV: 0,27)', unit:'m', def:'0.27'},
+    F.med('Distancia vertical al cauce')
+  ],
+  calc(v){
+    const G = isNaN(num(v.G)) ? 4.7 : num(v.G), Del = isNaN(num(v.Del)) ? 0.27 : num(v.Del);
+    const min = G + 2.3 + Del;
+    return resMin(num(v.med), min, 'm', [`<span class="formula">D = G + 2,3 + Del = ${fmt(G)} + 2,3 + ${fmt(Del)} = ${fmt(min)} m</span>`]);
+  }
+},
+{ id:'G71B', g:'MT', title:'Cruce con teleféricos y cables transportadores',
+  desc:'Distancia de los conductores a la catenaria del teleférico o a los cables transportadores.',
+  fields:[F.med()],
+  calc(v, e){
+    if (!e.known) return needDate();
+    const min = e.pre2010 ? 4 : 5;
+    return resMin(num(v.med), min, 'm', [`Instalación ${p10(e)}: D = ${min} m.`]);
+  }
+},
+{ id:'L21B', g:'MT', title:'Distancia a la masa vegetal',
+  desc:'Distancia entre los conductores y el arbolado.',
+  fields:[F.med('Distancia conductor → vegetación')],
+  calc(v, e){
+    if (!e.known) return needDate();
+    let min = 2, why;
+    if (e.pre2010) why = `Instalación ${p10(e)}: 2 m para líneas desnudas y aisladas.`;
+    else if (e.cond === 'desnudo') why = `Instalación ${p10(e)}, conductor desnudo: 2 m.`;
+    else if (e.U > 20) why = `Instalación ${p10(e)}, línea aislada de más de 20 kV: 2 m.`;
+    else { min = 1.5; why = `Instalación ${p10(e)}, línea aislada (haz o recubierto) ≤ 20 kV: 1,5 m.`; }
+    return resMin(num(v.med), min, 'm', [why]);
+  }
+},
+{ id:'L22B', g:'MT', title:'Árbol a más de 2 m con riesgo de caída sobre la línea',
+  desc:'Árboles más altos que la línea, a menos distancia que su propia altura, con terreno que hace prever su caída.',
+  fields:[
+    {k:'hA', t:'num', label:'Altura del árbol', unit:'m'},
+    {k:'hL', t:'num', label:'Altura de los conductores', unit:'m'},
+    {k:'d', t:'num', label:'Distancia del árbol a la línea', unit:'m'},
+    {k:'riesgo', t:'chk', label:'Pendiente, terreno inconsistente o árbol inclinado hacia la línea'}
+  ],
+  calc(v){
+    const hA = num(v.hA), hL = num(v.hL), d = num(v.d);
+    if ([hA, hL, d].some(isNaN)) return {st:'pend', lines:['Rellena altura del árbol, de los conductores y distancia.']};
+    const lines = [];
+    const masAlto = hA > hL, alcanza = d < hA;
+    lines.push(`Árbol ${masAlto ? 'más alto' : 'no más alto'} que la línea (${fmt(hA)} m frente a ${fmt(hL)} m).`);
+    lines.push(`Distancia ${fmt(d)} m ${alcanza ? '<' : '≥'} altura del árbol ${fmt(hA)} m: ${alcanza ? 'podría alcanzarla' : 'no la alcanza'}.`);
+    if (d < 2) lines.push('Está a menos de 2 m: revisa también L21B.');
+    if (masAlto && alcanza && !v.riesgo) lines.push('Solo es defecto si la pendiente o el terreno hacen prever su caída.');
+    return {st: (masAlto && alcanza && v.riesgo) ? 'def' : 'ok', lines, plain:true};
+  }
+},
+{ id:'L31B', g:'MT', title:'Distancia a edificios en zona accesible',
+  desc:'Distancia directa entre el punto accesible del edificio (terraza, balcón…) y el conductor.',
+  fields:[F.med('Distancia directa al punto accesible')],
+  calc(v, e){
+    if (e.cond === 'haz') return resMin(num(v.med), 4, 'm', ['Cable aislado en haz: 4 m sea cual sea la fecha.', 'Un tejado es accesible si tiene algún tipo de terraza.']);
+    if (!e.known) return needDate();
+    const min = e.pre2010 ? 5 : 6;
+    return resMin(num(v.med), min, 'm', [`Instalación ${p10(e)}, conductor ${condTxt(e.cond)}: D = ${min} m.`, 'Un tejado es accesible si tiene algún tipo de terraza.']);
+  }
+},
+{ id:'L32B', g:'MT', title:'Distancia a edificios en zona inaccesible',
+  desc:'Edificios, tejados sin terraza, farolas, vallas publicitarias y cualquier zona de riesgo no accesible.',
+  fields:[F.med()],
+  calc(v, e){
+    const min = e.cond === 'haz' ? 2 : 4;
+    return resMin(num(v.med), min, 'm', [e.cond === 'haz' ? 'Cable aislado en haz: 2 m.' : `Conductor ${condTxt(e.cond)}: 4 m.`, 'Los apoyos de otras líneas no son edificaciones: usar la distancia de cruce.']);
+  }
+},
+{ id:'L33B', g:'MT', title:'Distancia a edificio solo en proyección horizontal',
+  desc:'Distancia en proyección horizontal entre el edificio y el conductor (en su máximo desplazamiento).',
+  fields:[
+    {k:'acc', t:'sel', label:'Zona del edificio', def:'si', opts:[['si','Accesible'],['no','No accesible']]},
+    F.med('Distancia horizontal')
+  ],
+  calc(v, e){
+    if (!e.known) return needDate();
+    if (e.pre2001) return {st:'ok', lines:['Instalación anterior a 2001: no hay defecto L33B.'], plain:true};
+    return resMin(num(v.med), 5, 'm', ['Instalación posterior a 2001: D = 5 m.', `Indica en observaciones: accesibilidad ${v.acc === 'no' ? 'no' : 'sí'} y época posterior a 2001.`, 'Reversible con carta de mutuo acuerdo si se cumplen el resto de distancias y la seguridad reforzada.']);
+  }
+},
+{ id:'L61B', g:'MT', title:'Distancia vertical al terreno',
+  desc:'Distancia vertical de los conductores al punto más próximo del terreno.',
+  fields:[
+    {k:'expl', t:'chk', label:'Atraviesa explotación ganadera cercada o agrícola'},
+    {k:'dif', t:'chk', label:'Lugar de difícil acceso'},
+    {k:'rod', t:'chk', label:'No se prevé circulación rodada', show:(v,e)=>e.cond==='haz'},
+    {k:'cat', t:'chk', label:'Instalación en Cataluña (D328)', show:v=>v.dif},
+    F.med('Distancia vertical al terreno')
+  ],
+  calc(v, e){
+    let min = 6; const lines = [];
+    if (v.expl) {
+      if (!e.known) return needDate();
+      if (!e.pre2010) { min = 7; lines.push(`Instalación ${p10(e)} sobre explotación ganadera o agrícola: 7 m.`); }
+      else lines.push('Explotación ganadera/agrícola: los 7 m solo aplican a líneas posteriores a 2010.');
+    }
+    if (min === 6) {
+      if (e.cond === 'haz' && (v.rod || v.dif)) { min = 5; lines.push('Cable en haz sin circulación rodada o de difícil acceso: 5 m.'); }
+      else if (v.dif && !v.cat) { min = 5; lines.push('Lugar de difícil acceso: se puede reducir 1 m → 5 m.'); }
+      else if (v.dif && v.cat) lines.push('En Cataluña no se permite la reducción por difícil acceso: 6 m.');
+      else lines.push('Distancia general: 6 m.');
+    }
+    return resMin(num(v.med), min, 'm', lines);
+  }
+},
 
-  // Resultado
-  let resumenTxt = hallazgos.length === 0
-    ? 'No se han detectado defectos ✅'
-    : `Detectados ${hallazgos.length} defecto(s): ${hallazgos.map(h=>h.codigo).join(', ')} ❗`;
+/* ===================== PT (FED030) ===================== */
+{ id:'L37C', g:'PT', title:'Distancia a edificaciones',
+  desc:'Distancia directa entre el edificio o construcción y cualquier punto en tensión del PT.',
+  fields:[
+    {k:'acc', t:'sel', label:'Zona del edificio', def:'si', opts:[['si','Accesible'],['no','Inaccesible (tejado sin terraza, farolas, vallas…)']]},
+    F.med('Distancia directa al punto en tensión')
+  ],
+  calc(v, e){
+    if (v.acc === 'no') return resMin(num(v.med), 4, 'm', ['Zona inaccesible: D = 4 m. Farolas, semáforos y vallas publicitarias cuentan como inaccesibles.']);
+    if (!e.known) return needDate();
+    const min = e.pre2010 ? 5 : 6;
+    return resMin(num(v.med), min, 'm', [`Zona accesible, puesta en servicio ${p10(e)}: D = ${min} m.`]);
+  }
+},
+{ id:'L21C', g:'PT', title:'Distancia a la masa vegetal',
+  desc:'Distancia entre los conductores o partes en tensión y el arbolado.',
+  fields:[F.med('Distancia a la vegetación')],
+  calc(v){ return resMin(num(v.med), 2, 'm', ['Mínimo 2 m.']); }
+},
+{ id:'D12C', g:'PT', title:'Altura sobre el terreno de partes en tensión',
+  desc:'Altura de cualquier elemento en tensión sobre el terreno en la base del PT.',
+  fields:[
+    {k:'cierre', t:'chk', label:'Hay cierre de protección ≥ 2,2 m en horizontal y ≥ 2,5 m de alto (malla ≤ 50×50 cm)'},
+    F.med('Altura del elemento en tensión más bajo')
+  ],
+  calc(v){
+    const r = resMin(num(v.med), 5, 'm', ['Mínimo 5 m sobre el terreno.']);
+    if (r.st === 'def' && v.cierre) { r.st = 'ok'; r.lines.push('Hay cierre de protección reglamentario: no se considera defecto.'); }
+    return r;
+  }
+},
+{ id:'D21C', g:'PT', title:'Altura sobre el terreno de la masa del transformador',
+  desc:'Altura del transformador sobre el terreno.',
+  fields:[
+    {k:'cierre', t:'chk', label:'Hay cierre de protección ≥ 2,2 m en horizontal y ≥ 2,5 m de alto (malla ≤ 50×50 cm)'},
+    F.med('Altura de la masa del trafo')
+  ],
+  calc(v){
+    const r = resMin(num(v.med), 3, 'm', ['Mínimo 3 m sobre el terreno.']);
+    if (r.st === 'def' && v.cierre) { r.st = 'ok'; r.lines.push('Hay cierre de protección reglamentario: no se considera defecto.'); }
+    return r;
+  }
+},
+{ id:'X12C', g:'PT', title:'Embarrado exterior. Separación entre fases',
+  desc:'Distancia al aire entre elementos en tensión.',
+  fields:[F.med('Separación entre fases', 'cm')],
+  calc(v, e){
+    const min = e.U <= 20 ? 16 : 27;
+    return resMin(num(v.med), min, 'cm', [e.U <= 20 ? '11, 15 y 20 kV: mínimo 16 cm.' : '25 kV: mínimo 27 cm.', 'Basta revisión ocular si es similar a la reglamentaria; nunca medir por contacto.']);
+  }
+},
 
-  resumenEl.textContent = resumenTxt;
-  detalleEl.innerText = hallazgos.map(h=>`${h.codigo}: ${h.texto}`).join('\n') || 'Ninguno';
-  card.hidden = false;
-  card.scrollIntoView({behavior:'smooth'});
+/* ===================== CD (FED029) ===================== */
+{ id:'X11D', g:'CD', title:'Embarrado interior. Separación entre fases o fase-masa',
+  desc:'Distancia al aire entre elementos en tensión y entre éstos y las estructuras metálicas.',
+  fields:[F.med('Separación medida', 'cm')],
+  calc(v, e){
+    const min = e.U <= 20 ? 16 : 27;
+    return resMin(num(v.med), min, 'cm', [e.U <= 20 ? '11, 15 y 20 kV: mínimo 16 cm.' : '25 kV: mínimo 27 cm.', 'Basta revisión ocular si es similar a la reglamentaria; nunca medir por contacto.']);
+  }
+},
+{ id:'V41D', g:'CD', title:'Protección de celdas: distancia a puntos en tensión',
+  desc:'Distancia horizontal entre la protección de la celda y los puntos en tensión MT. Usa V42D si es la celda del transformador.',
+  fields:[
+    {k:'celda', t:'sel', label:'Celda', def:'mt', opts:[['mt','Celda MT (V41D)'],['tr','Celda de transformador (V42D)']]},
+    {k:'prot', t:'sel', label:'Tipo de protección', def:'enrej', opts:[['noc','Pantalla/tabique macizo no conductor'],['cond','Pantalla/tabique macizo conductor'],['enrej','Pantalla de enrejado'],['bar','Barandillas, listones o cadenas']]},
+    F.med('Distancia horizontal protección → punto en tensión', 'cm')
+  ],
+  code: v => v.celda === 'tr' ? 'V42D' : 'V41D',
+  calc(v, e){
+    if (!e.known) return needDate();
+    const d = dCD(e.U, e.pre2016);
+    const lines = [`Centro ${p16(e)}, U = ${fmt(e.U,0)} kV → d = ${d} cm.`];
+    let min;
+    switch (v.prot) {
+      case 'noc': min = d; lines.push(`Tabique macizo no conductor: d = ${min} cm.`); break;
+      case 'cond': min = d + 3; lines.push(`Tabique macizo conductor: d + 3 = ${min} cm.`); break;
+      case 'bar': min = e.pre2016 ? 80 : 125; lines.push(`Barandillas, listones o cadenas: ${min} cm.`); break;
+      default: min = d + 10; lines.push(`Pantalla de enrejado: d + 10 = ${min} cm.`);
+    }
+    return resMin(num(v.med), min, 'cm', lines);
+  }
+},
+{ id:'V41D-H', g:'CD', codeTxt:'V41D/V42D', title:'Protección de celdas: alturas de pantallas y barandillas',
+  desc:'Alturas mínimas/máximas de las protecciones y altura de elementos en tensión sobre pasillos.',
+  fields:[
+    {k:'celda', t:'sel', label:'Celda', def:'mt', opts:[['mt','Celda MT (V41D)'],['tr','Celda de transformador (V42D)']]},
+    {k:'tipo', t:'sel', label:'Comprobar', def:'pant', opts:[['pant','Pantalla (tabique o enrejado)'],['bar','Barandillas, listones o cadenas'],['pas','Altura de elementos en tensión sobre pasillo']]},
+    {k:'sup', t:'num', label:'Altura del borde superior de la pantalla', unit:'cm', show:v=>v.tipo==='pant'},
+    {k:'inferior', t:'sel', label:'Elementos en tensión en la parte baja', def:'normal', opts:[['normal','Ninguno por debajo de 40 cm'],['bajo','Hay elementos por debajo de 40 cm'],['nada','No hay elementos en la parte inferior de la celda']], show:v=>v.tipo==='pant'},
+    {k:'inf', t:'num', label:'Altura del borde inferior de la pantalla', unit:'cm', show:v=>v.tipo==='pant'},
+    {k:'pmin', t:'num', label:'Altura del punto en tensión más bajo', unit:'cm', show:v=>v.tipo==='pant'&&v.inferior==='nada'},
+    {k:'X', t:'num', label:'Altura del borde superior (cadena: punto más bajo) X', unit:'cm', show:v=>v.tipo==='bar'},
+    {k:'n', t:'num', label:'Nº de listones / barandillas / cadenas', unit:'ud', show:v=>v.tipo==='bar'},
+    {k:'hueco', t:'num', label:'Mayor hueco libre bajo el listón superior', unit:'cm', show:v=>v.tipo==='bar'},
+    {k:'hp', t:'num', label:'Altura de los elementos en tensión sobre el pasillo', unit:'cm', show:v=>v.tipo==='pas'}
+  ],
+  code: v => v.celda === 'tr' ? 'V42D' : 'V41D',
+  calc(v, e){
+    const lines = [], fails = [];
+    let any = false;
+    if (v.tipo === 'pas') {
+      if (!e.known) return needDate();
+      const d = dCD(e.U, e.pre2016), min = (e.pre2016 ? 230 : 250) + d;
+      lines.push(`Centro ${p16(e)}: altura mínima ${e.pre2016 ? 230 : 250} + d = ${min} cm (d = ${d} cm).`);
+      return resMin(num(v.hp), min, 'cm', lines);
+    }
+    if (v.tipo === 'bar') {
+      const X = num(v.X), n = num(v.n), h = num(v.hueco);
+      if (!isNaN(X)) { any = true; lines.push(`Borde superior ${fmt(X,0)} cm (mínimo 100 cm).`); if (X < 100) fails.push(`Borde superior a ${fmt(X,0)} cm < 100 cm.`); }
+      if (!isNaN(n)) { any = true; lines.push(`${fmt(n,0)} elementos (mínimo 3).`); if (n < 3) fails.push(`Solo ${fmt(n,0)} elementos: deben ser al menos 3.`); }
+      if (!isNaN(h)) {
+        any = true;
+        const maxH = isNaN(X) ? 40 : Math.min(0.3 * X, 40);
+        lines.push(`Hueco máximo permitido: ${isNaN(X) ? '40 cm' : `30 % de X con máximo 40 = ${fmt(maxH,1)} cm`}.`);
+        if (h > maxH) fails.push(`Hueco de ${fmt(h,0)} cm > ${fmt(maxH,1)} cm.`);
+      }
+    } else {
+      const s = num(v.sup), i = num(v.inf);
+      if (!isNaN(s)) {
+        any = true;
+        const minS = e.pre1982 ? 170 : 180;
+        lines.push(`Borde superior mínimo ${minS} cm${e.pre1982 ? ' (instalación anterior al RD 3275/1982)' : e.known ? '' : ' (170 cm si es anterior al RD 3275/1982)'}.`);
+        if (s < minS) fails.push(`Borde superior a ${fmt(s,0)} cm < ${minS} cm.`);
+      }
+      if (!isNaN(i)) {
+        any = true;
+        if (v.inferior === 'nada') {
+          const p = num(v.pmin);
+          if (isNaN(p)) lines.push('Indica la altura del punto en tensión más bajo.');
+          else { const maxI = p - 25; lines.push(`Sin elementos abajo: debe quedar al menos 25 cm hasta el punto en tensión más bajo → borde inferior ≤ ${fmt(maxI,0)} cm.`); if (i > maxI) fails.push(`Borde inferior a ${fmt(i,0)} cm: solo ${fmt(p - i,0)} cm hasta el punto en tensión.`); }
+        } else {
+          const maxI = v.inferior === 'bajo' ? 20 : 40;
+          lines.push(`Borde inferior máximo ${maxI} cm${v.inferior === 'bajo' ? ' (hay elementos en tensión por debajo de 40 cm)' : ''}.`);
+          if (i > maxI) fails.push(`Borde inferior a ${fmt(i,0)} cm > ${maxI} cm.`);
+        }
+      }
+    }
+    if (!any) return {st:'pend', lines:['Introduce las medidas.']};
+    return {st: fails.length ? 'def' : 'ok', lines, extraDef: fails, plain:true};
+  }
+},
+{ id:'V23D', g:'CD', title:'Pasillos no reglamentarios (anchura)',
+  desc:'Anchura libre de pasillos de maniobra e inspección, medida entre partes salientes (mandos, manetas, barandillas…).',
+  fields:[
+    {k:'tipo', t:'sel', label:'Pasillo de', def:'man', opts:[['man','Maniobra'],['insp','Inspección']]},
+    {k:'lados', t:'sel', label:'Elementos en alta tensión', def:'uno', opts:[['uno','A un solo lado'],['dos','A ambos lados'],['ninguno','Sin elementos en tensión']]},
+    {k:'env', t:'chk', label:'Celdas bajo envolvente aislante (UNE-EN 62271-201)'},
+    F.med('Anchura libre del pasillo')
+  ],
+  calc(v){
+    let min; const lines = [];
+    if (v.env) { min = 0.8; lines.push('Celdas bajo envolvente aislante: mínimo 0,8 m.'); }
+    else if (v.tipo === 'man') {
+      min = v.lados === 'dos' ? 1.2 : 1.0;
+      lines.push(v.lados === 'dos' ? 'Maniobra con AT a ambos lados: 1,2 m.' : v.lados === 'uno' ? 'Maniobra con AT a un lado: 1 m.' : 'Pasillo de maniobra: 1 m.');
+    } else {
+      min = v.lados === 'dos' ? 1.0 : 0.8;
+      lines.push(v.lados === 'dos' ? 'Inspección con AT a ambos lados: 1 m.' : v.lados === 'uno' ? 'Inspección con AT a un lado: 0,8 m.' : 'Pasillo de inspección: 0,8 m.');
+    }
+    lines.push('Entre celdas y cuadro BT cuenta como maniobra con tensión a un lado. El tabique macizo y el mando no cuentan como elementos en tensión.');
+    return resMin(num(v.med), min, 'm', lines);
+  }
+},
+{ id:'V25D', g:'CD', title:'Iluminación a menos de 1 m de la MT',
+  desc:'Acceso a los elementos de iluminación respecto a la MT (defecto si es el único punto de luz).',
+  fields:[
+    {k:'unico', t:'chk', label:'Es el único punto de iluminación', def:true},
+    F.med('Distancia del acceso al punto de luz a la MT')
+  ],
+  calc(v){
+    const r = resMin(num(v.med), 1, 'm', ['Mínimo 1 m respecto a la MT.']);
+    if (r.st === 'def' && !v.unico) { r.st = 'ok'; r.lines.push('Hay otros puntos de luz: solo es defecto si este es el único.'); }
+    return r;
+  }
+}
+];
+
+/* ---------- valores por comprobación ---------- */
+function vals(c){
+  if (!VALS[c.id]) VALS[c.id] = {};
+  const v = VALS[c.id];
+  c.fields.forEach(f => { if (v[f.k] === undefined && f.def !== undefined) v[f.k] = f.def; });
+  return v;
+}
+const codeOf = (c, v) => c.code ? c.code(v) : (c.codeTxt || c.id);
+
+/* ---------- render ---------- */
+const lista = $('#lista');
+const cardEls = {};
+
+function fieldHTML(c, f, v){
+  const id = `f-${c.id}-${f.k}`;
+  if (f.t === 'chk') return `<label class="chk fld full" data-k="${f.k}"><input type="checkbox" id="${id}" ${v[f.k] ? 'checked' : ''}/> <span>${f.label}</span></label>`;
+  if (f.t === 'sel') return `<label class="fld ${f.opts.length > 2 || f.opts.some(o => o[1].length > 16) ? 'full' : ''}" data-k="${f.k}">${f.label}<select id="${id}">${f.opts.map(o => `<option value="${o[0]}" ${v[f.k] === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></label>`;
+  const full = f.k === 'med' ? 'full' : '';
+  return `<label class="fld ${full}" data-k="${f.k}">${f.label}${f.unit ? ` (${f.unit})` : ''}<input type="number" id="${id}" inputmode="decimal" step="any" min="0" value="${esc(v[f.k] ?? '')}" /></label>`;
+}
+
+function buildCards(){
+  lista.innerHTML = '';
+  CHECKS.forEach(c => {
+    const v = vals(c);
+    const el = document.createElement('article');
+    el.className = 'chkcard';
+    el.dataset.g = c.g;
+    el.dataset.search = (c.id + ' ' + (c.codeTxt || '') + ' ' + c.title + ' ' + c.desc).toLowerCase();
+    el.innerHTML = `
+      <button type="button" class="chkhead" aria-expanded="false">
+        <span class="code"></span><span class="ttl">${c.title}</span><span class="pill"></span><span class="chev"></span>
+      </button>
+      <div class="chkbody">
+        <p class="desc">${c.desc}</p>
+        <div class="grid fields">${c.fields.map(f => fieldHTML(c, f, v)).join('')}</div>
+        <div class="res"></div>
+        <div class="addbox">
+          <label>Apoyo / vano / ubicación<input type="text" class="ref" placeholder="Ej. Apoyo 14-15" autocomplete="off" /></label>
+          <button type="button" class="add">Añadir al informe</button>
+        </div>
+      </div>`;
+    el.querySelector('.chkhead').addEventListener('click', () => {
+      const open = el.classList.toggle('open');
+      el.querySelector('.chkhead').setAttribute('aria-expanded', open);
+    });
+    c.fields.forEach(f => {
+      const inp = el.querySelector(`#f-${c.id}-${f.k}`);
+      const ev = f.t === 'num' ? 'input' : 'change';
+      inp.addEventListener(ev, () => {
+        v[f.k] = f.t === 'chk' ? inp.checked : inp.value;
+        store.set('cmt_vals', VALS);
+        update(c);
+      });
+    });
+    el.querySelector('.add').addEventListener('click', () => addToReport(c, el));
+    lista.appendChild(el);
+    cardEls[c.id] = el;
+  });
+}
+
+function update(c){
+  const el = cardEls[c.id], v = vals(c), e = eras();
+  c.fields.forEach(f => {
+    const w = el.querySelector(`.fld[data-k="${f.k}"]`);
+    w.hidden = f.show ? !f.show(v, e) : false;
+  });
+  const code = codeOf(c, v);
+  el.querySelector('.code').textContent = code;
+  const r = c.calc(v, e) || {st:'pend', lines:[]};
+  c._last = r;
+  const extra = r.extraDef || [];
+  let st = r.st;
+  if (extra.length && st !== 'na' && st !== 'pend' && !r.plain) st = 'def';
+  if (extra.length && (st === 'pend' || st === 'info') && !r.plain) st = 'def';
+  r.final = st;
+
+  el.classList.remove('st-def', 'st-ok');
+  if (st === 'def') el.classList.add('st-def');
+  if (st === 'ok') el.classList.add('st-ok');
+  const pill = el.querySelector('.pill');
+  pill.className = 'pill ' + st;
+  pill.textContent = st === 'def' ? 'Defecto' : st === 'ok' ? 'Correcto' : '';
+
+  let h = '';
+  const minTxt = r.min != null ? `${fmt(r.min, r.unit === 'cm' ? 0 : 2)} ${r.unit}` : null;
+  if (st === 'def') h += `<div class="big">❗ Defecto ${code}</div>`;
+  else if (st === 'ok') h += `<div class="big">✔ No es defecto</div>`;
+  else if (st === 'na') h += `<div class="big">Falta un dato</div>`;
+  else if (st === 'info') h += `<div class="big">Comprobación visual</div>`;
+  else if (minTxt) h += `<div class="big">Mínimo reglamentario: ${minTxt}</div>`;
+  if (minTxt && !isNaN(r.med) && r.med != null) {
+    h += `<div class="cmp">Medido <b>${fmt(r.med, r.unit === 'cm' ? 0 : 2)} ${r.unit}</b> ${r.st === 'def' ? '<' : '≥'} mínimo <b>${minTxt}</b></div>`;
+  }
+  const items = [...extra.map(x => `<b>${x}</b>`), ...(r.lines || [])];
+  if (items.length) h += `<ul>${items.map(x => `<li>${x}</li>`).join('')}</ul>`;
+  const res = el.querySelector('.res');
+  res.className = 'res ' + st;
+  res.innerHTML = h;
+  el.querySelector('.add').disabled = !(st === 'def' || st === 'ok');
+}
+
+function updateAll(){
+  CHECKS.forEach(update);
+  renderEras();
+  counts();
+}
+
+function counts(){
+  const n = {MT:0, PT:0, CD:0};
+  CHECKS.forEach(c => { if (c._last && c._last.final === 'def') n[c.g]++; });
+  document.querySelectorAll('#tabs button').forEach(b => {
+    const t = b.dataset.tab, cnt = b.querySelector('.cnt');
+    cnt.textContent = t === 'INF' ? (INF.length || '') : (n[t] || '');
+  });
+}
+
+function renderEras(){
+  const e = eras();
+  const el = $('#eras');
+  if (!e.known) { el.innerHTML = '<span class="warn">Sin fecha de puesta en servicio:</span> las distancias que dependen de la fecha no se calcularán.'; return; }
+  el.innerHTML = `Líneas: <b>${e.pre2010 ? 'antes' : 'después'} de 19/03/2010</b> · Centros PT/CD: <b>${e.pre2016 ? 'antes' : 'después'} de 09/06/2016</b> · L33B: <b>${e.pre2001 ? 'antes' : 'después'} de 2001</b>`;
+}
+
+/* ---------- pestañas y búsqueda ---------- */
+function setTab(t){
+  TAB = t; store.set('cmt_tab', t);
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  $('#vista-checks').hidden = t === 'INF';
+  $('#vista-informe').hidden = t !== 'INF';
+  if (t === 'INF') renderReport(); else filter();
+}
+function filter(){
+  const q = $('#buscar').value.trim().toLowerCase();
+  Object.values(cardEls).forEach(el => {
+    el.hidden = q ? !el.dataset.search.includes(q) : el.dataset.g !== TAB;
+  });
+}
+
+/* ---------- informe ---------- */
+function addToReport(c, el){
+  const v = vals(c), r = c._last;
+  if (!r || !(r.final === 'def' || r.final === 'ok')) return;
+  const code = codeOf(c, v);
+  const refInp = el.querySelector('.ref');
+  const dec = r.unit === 'cm' ? 0 : 2;
+  let obs;
+  if (r.min != null && !isNaN(r.med)) {
+    obs = r.final === 'def'
+      ? `Distancia mínima medida ${fmt(r.med, dec)} ${r.unit} < ${fmt(r.min, dec)} ${r.unit} reglamentaria`
+      : `Distancia medida ${fmt(r.med, dec)} ${r.unit} ≥ ${fmt(r.min, dec)} ${r.unit}`;
+  } else {
+    obs = (r.extraDef && r.extraDef.length ? r.extraDef : r.lines.slice(0, 2)).map(x => x.replace(/<[^>]+>/g, '')).join(' ');
+  }
+  if (r.extraDef && r.extraDef.length && r.min != null) obs += '. ' + r.extraDef.join(' ');
+  INF.push({
+    t: Date.now(), inst: G.inst, ref: refInp.value.trim(), code, title: c.title, guia: c.g,
+    st: r.final, med: isNaN(r.med) ? null : r.med, min: r.min ?? null, unit: r.unit || '', obs
+  });
+  store.set('cmt_informe', INF);
+  refInp.value = '';
+  counts();
+  toast(`${code} añadido al informe`);
+}
+
+function renderReport(){
+  const ul = $('#inf-lista');
+  const nd = INF.filter(x => x.st === 'def').length;
+  $('#inf-vacio').hidden = INF.length > 0;
+  $('#inf-acciones').hidden = INF.length === 0;
+  $('#inf-resumen').innerHTML = INF.length ? `<div><b>${INF.length}</b>comprobaciones</div><div class="d"><b>${nd}</b>defectos</div><div class="o"><b>${INF.length - nd}</b>correctas</div>` : '';
+  ul.innerHTML = INF.map((x, i) => `
+    <li class="${x.st}">
+      <b>${esc(x.code)}</b> · ${x.st === 'def' ? 'DEFECTO' : 'Correcto'}${x.ref ? ` <span class="ref">· ${esc(x.ref)}</span>` : ''}<br/>
+      ${esc(x.obs)}
+      <div class="ref">${esc(x.title)}${x.inst ? ' · ' + esc(x.inst) : ''} · ${new Date(x.t).toLocaleString('es-ES', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'})}</div>
+      <button type="button" class="del" data-i="${i}" aria-label="Quitar">×</button>
+    </li>`).join('');
+  ul.querySelectorAll('.del').forEach(b => b.addEventListener('click', () => {
+    INF.splice(+b.dataset.i, 1); store.set('cmt_informe', INF); renderReport(); counts();
+  }));
+}
+
+function reportText(){
+  const hoy = new Date().toLocaleDateString('es-ES');
+  const insts = [...new Set(INF.map(x => x.inst).filter(Boolean))];
+  const nd = INF.filter(x => x.st === 'def').length;
+  let t = `*Revisión de distancias${insts.length ? ' – ' + insts.join(', ') : ''}*\n${hoy} · ${nd} defecto(s) de ${INF.length} comprobaciones\n`;
+  const defs = INF.filter(x => x.st === 'def'), oks = INF.filter(x => x.st !== 'def');
+  if (defs.length) t += '\n❗ *Defectos*\n' + defs.map(x => `• ${x.code}${x.ref ? ' (' + x.ref + ')' : ''}: ${x.obs}`).join('\n') + '\n';
+  if (oks.length) t += '\n✔ *Correctos*\n' + oks.map(x => `• ${x.code}${x.ref ? ' (' + x.ref + ')' : ''}: ${x.obs}`).join('\n') + '\n';
+  return t;
+}
+
+$('#inf-wa').addEventListener('click', () => {
+  const t = reportText();
+  if (navigator.share) { navigator.share({text: t}).catch(() => {}); return; }
+  window.open('https://wa.me/?text=' + encodeURIComponent(t), '_blank');
 });
+$('#inf-copiar').addEventListener('click', () => {
+  const t = reportText();
+  (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('Texto copiado'), () => {
+    const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); toast('Texto copiado'); } catch(e){}
+    ta.remove();
+  });
+});
+$('#inf-csv').addEventListener('click', () => {
+  const q = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
+  const n = x => x == null ? '' : String(x).replace('.', ',');
+  const head = ['Fecha', 'Hora', 'Instalación', 'Apoyo/ubicación', 'Guía', 'Código', 'Descripción', 'Resultado', 'Medido', 'Mínimo', 'Unidad', 'Observaciones'];
+  const rows = INF.map(x => {
+    const d = new Date(x.t);
+    return [d.toLocaleDateString('es-ES'), d.toLocaleTimeString('es-ES', {hour:'2-digit', minute:'2-digit'}), x.inst, x.ref, x.guia, x.code, x.title, x.st === 'def' ? 'DEFECTO' : 'Correcto', n(x.med), n(x.min), x.unit, x.obs].map(q).join(';');
+  });
+  const csv = '﻿' + head.map(q).join(';') + '\r\n' + rows.join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8'}));
+  a.download = `CruzamientosMT_${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+$('#inf-borrar').addEventListener('click', () => {
+  if (!confirm('¿Vaciar todo el informe?')) return;
+  INF = []; store.set('cmt_informe', INF); renderReport(); counts();
+});
+
+/* ---------- datos globales ---------- */
+function bindGlobal(){
+  const inst = $('#g-inst'), fecha = $('#g-fecha'), U = $('#g-U');
+  inst.value = G.inst; fecha.value = G.fecha; U.value = G.U;
+  const save = () => store.set('cmt_global', G);
+  inst.addEventListener('input', () => { G.inst = inst.value; save(); });
+  fecha.addEventListener('change', () => { G.fecha = fecha.value; save(); updateAll(); });
+  U.addEventListener('input', () => { G.U = U.value; save(); updateAll(); });
+  const seg = $('#g-cond');
+  const paint = () => seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === G.cond));
+  seg.querySelectorAll('button').forEach(b => b.addEventListener('click', () => { G.cond = b.dataset.v; save(); paint(); updateAll(); }));
+  paint();
+}
+
+document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => { $('#buscar').value = ''; setTab(b.dataset.tab); }));
+$('#buscar').addEventListener('input', filter);
+
+bindGlobal();
+buildCards();
+updateAll();
+setTab(TAB);
+
+/* exponer para pruebas */
+window.__CMT = {CHECKS, eras, G};
+})();

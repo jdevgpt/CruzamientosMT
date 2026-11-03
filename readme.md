@@ -1,25 +1,31 @@
 # CruzamientosMT
 
-Webapp sencilla para detectar **defectos en cruzamientos de líneas de MT** siguiendo la Guía AED017.
+Webapp para comprobar en campo si una **distancia de conductores o partes en tensión** es defecto, según las guías de revisión de e-distribución (ene-2026):
 
-## 🚀 Cómo usar
+- **AED017 V6** – Líneas aéreas de MT
+- **FED030 V6** – Centros de transformación intemperie (PT)
+- **FED029 V7** – Centros de transformación tipo edificio (CD)
 
-1. Abrir `index.html` en un navegador (funciona localmente sin instalar nada).
-2. Introducir las medidas de campo y elegir tipo de cruce.
-3. Pulsar **Analizar cruce** → obtendrás:
-   - Resumen de defectos detectados.
-   - Explicación de cada cálculo.
+## Comprobaciones incluidas
 
-## 🎨 Diseño
-- Colores: **naranja, blanco y gris claro**.
-- Estilo simple y legible.
+**Líneas MT:** G23B (cruce con líneas eléctricas/telecom), GA2B (distancia horizontal a apoyos), G53B (carreteras), G58B (FF.CC. sin electrificar), G81B (FF.CC. electrificado), G61B (ríos y canales), G71B (teleféricos), L21B (vegetación), L22B (árbol con riesgo de caída), L31B / L32B (edificios accesibles / inaccesibles), L33B (edificio en proyección horizontal), L61B (terreno).
 
-## 🌐 Publicación en GitHub Pages
-1. Crear repositorio en GitHub llamado `CruzamientosMT`.
-2. Subir estos archivos (`index.html`, `styles.css`, `script.js`, `README.md`).
-3. Ir a **Settings → Pages** y elegir `Branch: main / root`.
-4. Tu app estará en:  
-   `https://TU-USUARIO.github.io/CruzamientosMT/`
+**PT:** L37C (edificaciones), L21C (vegetación), D12C (altura partes en tensión), D21C (altura masa del trafo), X12C (separación entre fases).
 
-## ⚠️ Nota
-La app es una **herramienta de ayuda**. Para decisiones oficiales, sigue la Guía AED017 y aporta siempre fotografías de campo.
+**CD:** X11D (embarrado interior), V41D / V42D (distancias y alturas de protecciones de celdas), V23D (anchura de pasillos), V25D (iluminación a menos de 1 m de MT).
+
+## Cómo usar
+
+1. Rellena arriba la instalación, la **fecha de puesta en servicio**, la tensión y el tipo de conductor. La app decide sola si aplica el reglamento anterior o posterior (líneas: 19/03/2010, centros: 09/06/2016, L33B: 2001).
+2. Abre la comprobación, mete la medida y verás al momento si es defecto, el mínimo aplicado y de dónde sale.
+3. Pulsa **Añadir al informe** con el apoyo o ubicación. En la pestaña **Informe** puedes compartirlo por WhatsApp, exportarlo a Excel (CSV) o copiarlo.
+
+Los datos se guardan en el propio móvil (no se envían a ningún sitio).
+
+## Publicación en GitHub Pages
+
+Sube `index.html`, `styles.css`, `script.js` y `README.md` a la rama `main` del repositorio y activa **Settings → Pages → Branch: main / root**.
+
+## Nota
+
+Herramienta de ayuda. Ante la duda manda la guía y aporta siempre fotografías de campo.

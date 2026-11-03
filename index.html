@@ -2,95 +2,91 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>CruzamientosMT — Detector de defectos</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#ff7a1a" />
+  <title>CruzamientosMT — Distancias reglamentarias</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="site-header">
     <div class="container">
       <h1>CruzamientosMT</h1>
-      <p class="tagline">Detecta defectos de cruzamientos en líneas MT — según Guía AED017</p>
+      <p class="tagline">Distancias de conductores y partes en tensión · Guías AED017 (MT), FED030 (PT) y FED029 (CD)</p>
     </div>
   </header>
 
   <main class="container">
-    <section class="card">
-      <h2>Introduzca medidas del cruce</h2>
-      <form id="form">
-        <label>Tipo de cruce
-          <select id="tipo">
-            <option value="linea-linea">Línea ↔ Línea / Telecom</option>
-            <option value="linea-carretera">Línea ↔ Carretera</option>
-            <option value="linea-edificio">Línea ↔ Edificio</option>
-            <option value="linea-rio">Línea ↔ Río/Canal</option>
-            <option value="linea-ferrocarril">Línea ↔ Ferrocarril</option>
-          </select>
+    <section class="card datos">
+      <h2>Datos de la instalación</h2>
+      <div class="grid">
+        <label class="full">Instalación / línea
+          <input type="text" id="g-inst" placeholder="Ej. LMT Almendralejo 2" autocomplete="off" />
         </label>
-
-        <fieldset>
-          <legend>Datos de la línea superior (si aplica)</legend>
-          <label>Tensión nominal U (kV)
-            <input type="number" id="U" step="0.1" min="0" value="15"/>
-          </label>
-          <label>Distancia al apoyo superior L1 (m)
-            <input type="number" id="L1" step="0.01" min="0" value="5"/>
-          </label>
-        </fieldset>
-
-        <fieldset>
-          <legend>Datos de la línea inferior / cruce</legend>
-          <label>Distancia al apoyo inferior L2 (m)
-            <input type="number" id="L2" step="0.01" min="0" value="5"/>
-          </label>
-          <label>Distancia medida entre conductores / rasante (m)
-            <input type="number" id="medida" step="0.01" min="0" value="2.5"/>
-          </label>
-        </fieldset>
-
-        <details>
-          <summary>Opciones avanzadas</summary>
-          <label>¿Instalación anterior a 2010?
-            <input type="checkbox" id="antes2010" checked />
-          </label>
-          <label>Tipo conductor:
-            <select id="tipoConductor">
-              <option value="desnudo">Desnudo</option>
-              <option value="recubierto">Recubierto</option>
-              <option value="unipolar">Unipolar aislado en haz</option>
-            </select>
-          </label>
-        </details>
-
-        <div class="actions">
-          <button type="button" id="analizar">Analizar cruce</button>
-          <button type="reset" class="muted">Limpiar</button>
-        </div>
-      </form>
+        <label>Fecha puesta en servicio
+          <input type="date" id="g-fecha" />
+        </label>
+        <label>Tensión nominal U (kV)
+          <input type="number" id="g-U" inputmode="decimal" step="any" min="0" list="tensiones" value="15" />
+          <datalist id="tensiones">
+            <option value="6"></option><option value="10"></option><option value="11"></option>
+            <option value="13"></option><option value="15"></option><option value="20"></option>
+            <option value="25"></option><option value="30"></option>
+          </datalist>
+        </label>
+        <label class="full">Tipo de conductor (líneas)
+          <div class="seg" id="g-cond">
+            <button type="button" data-v="desnudo">Desnudo</button>
+            <button type="button" data-v="recubierto">Recubierto</button>
+            <button type="button" data-v="haz">Aislado en haz</button>
+          </div>
+        </label>
+      </div>
+      <p class="eras" id="eras"></p>
     </section>
 
-    <section class="card" id="resultadoCard" hidden>
-      <h2>Resultado</h2>
-      <div id="resumen"></div>
-      <hr/>
-      <div id="detalle"></div>
+    <nav class="tabs" id="tabs">
+      <button type="button" data-tab="MT">Líneas <span class="cnt"></span></button>
+      <button type="button" data-tab="PT">PT <span class="cnt"></span></button>
+      <button type="button" data-tab="CD">CD <span class="cnt"></span></button>
+      <button type="button" data-tab="INF">Informe <span class="cnt"></span></button>
+    </nav>
+
+    <div id="vista-checks">
+      <input type="search" id="buscar" class="buscar" placeholder="Buscar código o defecto (ej. L31B, carretera…)" />
+      <div id="lista"></div>
+    </div>
+
+    <section id="vista-informe" hidden>
+      <div class="card">
+        <h2>Informe de la revisión</h2>
+        <p class="muted-txt" id="inf-vacio">Aún no has añadido nada. En cada comprobación pulsa <b>Añadir al informe</b>.</p>
+        <div id="inf-resumen" class="inf-resumen"></div>
+        <ul id="inf-lista" class="inf-lista"></ul>
+        <div class="actions wrap" id="inf-acciones">
+          <button type="button" id="inf-wa">Compartir por WhatsApp</button>
+          <button type="button" id="inf-csv" class="sec">Exportar a Excel</button>
+          <button type="button" id="inf-copiar" class="sec">Copiar texto</button>
+          <button type="button" id="inf-borrar" class="muted">Vaciar informe</button>
+        </div>
+      </div>
     </section>
 
     <section class="card info">
       <h3>Notas</h3>
       <ul>
-        <li>La app aplica las fórmulas y límites de la Guía AED017 (ver referencias en el README).</li>
-        <li>Siempre documenta con fotografías en campo si detectas un defecto (requisito de la guía).</li>
+        <li>Mide en condiciones normales (sin viento o viento muy flojo) y apunta en Observaciones la distancia mínima en cifras.</li>
+        <li>El reglamento considera la posición más desfavorable del conductor: aporta datos de conductor, vano y flecha y acompaña siempre fotografías.</li>
+        <li>Líneas: el corte es el 19/03/2010 (RD 223/2008). Centros (PT/CD): el 09/06/2016 (RD 337/2014), salvo que la unidad territorial indique otro reglamento.</li>
+        <li>Es una herramienta de ayuda: ante la duda manda la guía.</li>
       </ul>
     </section>
   </main>
 
   <footer class="site-footer">
-    <div class="container">
-      <small>Hecho para ti • CruzamientosMT • Colores: naranja / blanco / gris claro</small>
-    </div>
+    <small>CruzamientosMT · Guías de revisión V6/V7 ene-2026</small>
   </footer>
 
+  <div class="toast" id="toast" hidden></div>
   <script src="script.js"></script>
 </body>
 </html>
